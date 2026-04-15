@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -112,6 +113,18 @@ def ensure_ffmpeg_tools() -> list[str]:
     return missing
 
 
+def get_subprocess_windowless_kwargs() -> dict[str, object]:
+    if os.name != "nt":
+        return {}
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    return {
+        "creationflags": subprocess.CREATE_NO_WINDOW,
+        "startupinfo": startupinfo,
+    }
+
+
 def get_encoder_profile(codec: str = DEFAULT_CODEC) -> EncoderProfile:
     return ENCODER_PROFILES.get(codec, ENCODER_PROFILES[DEFAULT_CODEC])
 
@@ -125,6 +138,7 @@ def _list_ffmpeg_encoders() -> set[str]:
         encoding="utf-8",
         errors="replace",
         check=False,
+        **get_subprocess_windowless_kwargs(),
     )
     if completed.returncode != 0:
         return set()
@@ -225,6 +239,7 @@ def _probe_encoder_profile(profile: EncoderProfile, quality_value: int = DEFAULT
             errors="replace",
             check=False,
             timeout=20,
+            **get_subprocess_windowless_kwargs(),
         )
     except subprocess.TimeoutExpired:
         return False, "encoder probe timed out"
@@ -378,6 +393,7 @@ def probe_video(source_path: Path) -> VideoInfo:
         text=True,
         encoding="utf-8",
         errors="replace",
+        **get_subprocess_windowless_kwargs(),
     )
     if completed.returncode != 0:
         stderr_text = (completed.stderr or "").strip()

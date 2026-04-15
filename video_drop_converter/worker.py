@@ -5,7 +5,13 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from .core import EncoderProfile, QueueEntry, build_ffmpeg_command, format_file_size
+from .core import (
+    EncoderProfile,
+    QueueEntry,
+    build_ffmpeg_command,
+    format_file_size,
+    get_subprocess_windowless_kwargs,
+)
 
 
 class ConversionWorker(QThread):
@@ -62,6 +68,7 @@ class ConversionWorker(QThread):
                     encoding="utf-8",
                     errors="replace",
                     bufsize=1,
+                    **get_subprocess_windowless_kwargs(),
                 )
             except OSError as exc:
                 self.job_finished.emit(row_index, False, "", str(exc))
