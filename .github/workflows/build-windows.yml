@@ -1,0 +1,72 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: python -m pip install --upgrade pip uv
+
+      - name: Sync project dependencies
+        run: uv sync --extra build
+
+      - name: Build Windows executable
+        run: uv run python scripts/build_windows.py
+
+      - name: Collect build outputs
+        id: build_outputs
+        shell: pwsh
+        run: |
+          $exePath = (Get-ChildItem dist\*.exe | Select-Object -First 1).FullName
+          $zipPath = (Get-ChildItem artifacts\*.zip | Select-Object -First 1).FullName
+          $zipName = [System.IO.Path]::GetFileName($zipPath)
+
+          "exe_path=$exePath" >> $env:GITHUB_OUTPUT
+          "zip_path=$zipPath" >> $env:GITHUB_OUTPUT
+          "zip_name=$zipName" >> $env:GITHUB_OUTPUT
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: TRANSVID-windows-x64
+          path: ${{ steps.build_outputs.outputs.exe_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tagName = "${{ github.ref_name }}"
+          $zipPath = "${{ steps.build_outputs.outputs.zip_path }}"
+
+          gh release view $tagName *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tagName $zipPath --title $tagName --generate-notes
+          }
+          else {
+            gh release upload $tagName $zipPath --clobber
+          }
