@@ -86,7 +86,7 @@ sample.mp4
 
 ## 빌드
 
-PyInstaller 기반 Windows exe 빌드를 제공합니다.
+PyInstaller 기반 Windows `onedir` 빌드를 제공합니다.
 
 ```bash
 uv sync --extra build
@@ -95,16 +95,17 @@ uv run python scripts/build_windows.py
 
 산출물:
 
-- `dist/TRANSVID.exe`
+- `dist/TRANSVID/TRANSVID.exe`
+- `dist/TRANSVID/*` 실행에 필요한 DLL/Qt 파일
 - `artifacts/TRANSVID-<version>-windows-x64.zip`
 
 ## GitHub Actions
 
 `.github/workflows/build-windows.yml` 이 포함되어 있습니다.
 
-- `push` / `pull_request` / 수동 실행 시 Windows exe 자동 빌드
-- Actions artifact로 exe 다운로드 가능
-- `v*` 태그 푸시 시 GitHub Release에 exe/zip 자산 자동 업로드
+- `push` / `pull_request` / 수동 실행 시 Windows onedir 자동 빌드
+- Actions artifact로 실행 폴더와 zip 다운로드 가능
+- `v*` 태그 푸시 시 GitHub Release에 zip 자산 자동 업로드
 
 ## 손상 파일
 

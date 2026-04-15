@@ -33,14 +33,14 @@ def remove_previous_outputs() -> None:
         SPEC_PATH.unlink()
 
 
-def run_pyinstaller() -> Path:
+def run_pyinstaller() -> tuple[Path, Path]:
     command = [
         sys.executable,
         "-m",
         "PyInstaller",
         "--noconfirm",
         "--clean",
-        "--onefile",
+        "--onedir",
         "--windowed",
         "--specpath",
         str(BUILD_DIR),
@@ -50,25 +50,29 @@ def run_pyinstaller() -> Path:
     ]
     subprocess.run(command, cwd=PROJECT_ROOT, check=True)
 
-    exe_path = DIST_DIR / f"{APP_NAME}.exe"
+    app_dir = DIST_DIR / APP_NAME
+    exe_path = app_dir / f"{APP_NAME}.exe"
     if not exe_path.exists():
         raise FileNotFoundError(f"빌드 산출물을 찾지 못했습니다: {exe_path}")
-    return exe_path
+    return app_dir, exe_path
 
 
-def package_zip(exe_path: Path, version: str) -> Path:
+def package_zip(app_dir: Path, version: str) -> Path:
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
     archive_path = ARTIFACTS_DIR / f"{APP_NAME}-{version}-windows-x64.zip"
     with ZipFile(archive_path, "w", compression=ZIP_DEFLATED) as zip_file:
-        zip_file.write(exe_path, arcname=exe_path.name)
+        for file_path in app_dir.rglob("*"):
+            if file_path.is_file():
+                zip_file.write(file_path, arcname=file_path.relative_to(DIST_DIR))
     return archive_path
 
 
 def main() -> None:
     version = load_project_version()
     remove_previous_outputs()
-    exe_path = run_pyinstaller()
-    archive_path = package_zip(exe_path, version)
+    app_dir, exe_path = run_pyinstaller()
+    archive_path = package_zip(app_dir, version)
+    print(f"Built app directory: {app_dir}")
     print(f"Built EXE: {exe_path}")
     print(f"Release archive: {archive_path}")
 
