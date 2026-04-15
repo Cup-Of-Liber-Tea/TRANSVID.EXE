@@ -465,6 +465,8 @@ class MainWindow(QMainWindow):
         self._skip_hevc_checkbox.setChecked(True)
         self._skip_existing_checkbox = QCheckBox("출력 파일이 있으면 건너뛰기")
         self._skip_existing_checkbox.setChecked(True)
+        self._delete_source_checkbox = QCheckBox("완료되면 원본 삭제")
+        self._delete_source_checkbox.setChecked(False)
 
         layout.addWidget(QLabel("코덱"), 0, 0)
         layout.addWidget(self._codec_value_label, 0, 1)
@@ -485,6 +487,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._auto_start_checkbox, 2, 0, 1, 2)
         layout.addWidget(self._skip_hevc_checkbox, 2, 2, 1, 2)
         layout.addWidget(self._skip_existing_checkbox, 2, 4, 1, 3)
+        layout.addWidget(self._delete_source_checkbox, 3, 0, 1, 2)
         layout.setColumnStretch(7, 1)
 
         self._update_setting_labels()
@@ -589,6 +592,14 @@ class MainWindow(QMainWindow):
             self._append_log(
                 f"실측 속도 반영: {self._encoder_profile.codec} 기준 {previous_value:.1f}x -> {calibrated_value:.1f}x"
             )
+
+    @staticmethod
+    def _delete_source_file(source_path: Path) -> tuple[bool, str]:
+        try:
+            source_path.unlink()
+        except OSError as exc:
+            return False, f"원본 삭제 실패: {source_path.name} ({exc})"
+        return True, f"원본 삭제: {source_path.name}"
 
     def _check_tools(self) -> bool:
         missing = ensure_ffmpeg_tools()
@@ -793,19 +804,27 @@ class MainWindow(QMainWindow):
         job = self._jobs[row_index]
         job.status = "완료" if success else "실패"
         job.speed = speed
-        job.detail = detail
+        detail_text = detail
         if success:
             job.progress = 100.0
             self._record_speed_sample(speed)
+            if self._delete_source_checkbox.isChecked():
+                deleted, delete_message = self._delete_source_file(job.queue_entry.source_path)
+                self._append_log(delete_message)
+                if deleted:
+                    detail_text = f"{detail_text} | 원본 삭제"
+                else:
+                    detail_text = f"{detail_text} | 원본 삭제 실패"
 
+        job.detail = detail_text
         self._set_cell_text(row_index, STATUS_COLUMN, job.status)
         self._set_cell_text(row_index, PROGRESS_COLUMN, f"{job.progress:.1f}%")
         self._set_cell_text(row_index, SPEED_COLUMN, speed)
-        self._set_cell_text(row_index, DETAIL_COLUMN, detail)
+        self._set_cell_text(row_index, DETAIL_COLUMN, detail_text)
         if success:
-            self._append_log(f"완료: {job.queue_entry.source_path.name} -> {detail}")
+            self._append_log(f"완료: {job.queue_entry.source_path.name} -> {detail_text}")
         else:
-            self._append_log(f"실패: {job.queue_entry.source_path.name} ({detail})")
+            self._append_log(f"실패: {job.queue_entry.source_path.name} ({detail_text})")
         self._update_summary()
 
     def _on_worker_batch_finished(self, cancelled: bool) -> None:
@@ -896,6 +915,7 @@ class MainWindow(QMainWindow):
         self._fps_combo.setEnabled(enabled)
         self._parallel_combo.setEnabled(enabled)
         self._baseline_spin.setEnabled(enabled)
+        self._delete_source_checkbox.setEnabled(enabled)
 
     def _selected_target_fps(self) -> int:
         return int(self._fps_combo.currentData())
