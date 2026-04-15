@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -24,7 +23,12 @@ VIDEO_EXTENSIONS = {
 DEFAULT_CODEC = "hevc_nvenc"
 DEFAULT_PRESET = "p1"
 DEFAULT_CQ = 28
-DEFAULT_SUFFIX_TEMPLATE = ".{codec}_{preset}_cq{cq}"
+DEFAULT_TARGET_FPS = 24
+DEFAULT_PARALLEL_JOBS = 2
+DEFAULT_BASELINE_REALTIME = 29.0
+DEFAULT_SUFFIX_TEMPLATE = ".{codec}_{preset}_cq{cq}{fps_suffix}"
+FPS_OPTIONS = [0, 24, 30]
+PARALLEL_JOB_OPTIONS = [1, 2, 3]
 
 
 @dataclass(slots=True)
@@ -53,16 +57,54 @@ def ensure_ffmpeg_tools() -> list[str]:
     return missing
 
 
-def make_suffix(codec: str = DEFAULT_CODEC, preset: str = DEFAULT_PRESET, cq: int = DEFAULT_CQ) -> str:
-    return DEFAULT_SUFFIX_TEMPLATE.format(codec=codec, preset=preset, cq=cq)
+def make_suffix(
+    codec: str = DEFAULT_CODEC,
+    preset: str = DEFAULT_PRESET,
+    cq: int = DEFAULT_CQ,
+    target_fps: int = 0,
+) -> str:
+    fps_suffix = f"_fps{target_fps}" if target_fps > 0 else ""
+    return DEFAULT_SUFFIX_TEMPLATE.format(codec=codec, preset=preset, cq=cq, fps_suffix=fps_suffix)
 
 
-def get_runtime_output_directory() -> Path:
-    if sys.argv and sys.argv[0] and sys.argv[0] not in {"-", "-c"}:
-        entry_path = Path(sys.argv[0]).expanduser()
-        if entry_path.exists():
-            return entry_path.resolve().parent
-    return Path.cwd().resolve()
+def format_target_fps(target_fps: int) -> str:
+    if target_fps <= 0:
+        return "원본 유지"
+    return f"{target_fps} fps"
+
+
+def estimate_speed_multiplier(
+    cq: int,
+    target_fps: int,
+    parallel_jobs: int,
+) -> float:
+    cq_factor = 1.0 + ((cq - DEFAULT_CQ) * 0.02)
+    cq_factor = max(0.84, min(cq_factor, 1.18))
+
+    if target_fps <= 0:
+        fps_factor = 1.0
+    else:
+        fps_factor = 30.0 / float(target_fps)
+        fps_factor = max(0.8, min(fps_factor, 1.35))
+
+    parallel_factor_map = {
+        1: 1.0,
+        2: 1.65,
+        3: 1.95,
+    }
+    parallel_factor = parallel_factor_map.get(parallel_jobs, 1.0 + (parallel_jobs - 1) * 0.45)
+
+    return round(cq_factor * fps_factor * parallel_factor, 2)
+
+
+def estimate_realtime_speed(
+    baseline_realtime: float,
+    cq: int,
+    target_fps: int,
+    parallel_jobs: int,
+) -> float:
+    multiplier = estimate_speed_multiplier(cq, target_fps, parallel_jobs)
+    return round(baseline_realtime * multiplier, 1)
 
 
 def format_duration(duration_seconds: float) -> str:
@@ -119,12 +161,20 @@ def probe_video(source_path: Path) -> VideoInfo:
     ]
     completed = subprocess.run(
         command,
-        check=True,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
     )
+    if completed.returncode != 0:
+        stderr_text = (completed.stderr or "").strip()
+        normalized = stderr_text.lower()
+        if "moov atom not found" in normalized:
+            raise ValueError("moov atom not found: 손상되었거나 녹화가 정상 종료되지 않은 MP4 파일입니다.")
+        if stderr_text:
+            raise ValueError(stderr_text)
+        raise ValueError("ffprobe가 파일을 해석하지 못했습니다.")
+
     payload = json.loads(completed.stdout)
     streams = payload.get("streams", [])
     format_info = payload.get("format", {})
@@ -149,26 +199,10 @@ def probe_video(source_path: Path) -> VideoInfo:
 def build_output_path(
     source_path: Path,
     suffix: str,
-    output_dir: Path | None = None,
     extension: str | None = None,
 ) -> Path:
     final_extension = extension or source_path.suffix
-    target_dir = output_dir.resolve() if output_dir is not None else source_path.parent
-    return target_dir / f"{source_path.stem}{suffix}{final_extension}"
-
-
-def make_unique_output_path(output_path: Path, reserved_paths: Iterable[Path] | None = None) -> Path:
-    reserved = {path.resolve() for path in reserved_paths or []}
-    candidate = output_path.resolve()
-    if candidate not in reserved and not candidate.exists():
-        return candidate
-
-    counter = 2
-    while True:
-        candidate = output_path.with_name(f"{output_path.stem}_{counter}{output_path.suffix}").resolve()
-        if candidate not in reserved and not candidate.exists():
-            return candidate
-        counter += 1
+    return source_path.with_name(f"{source_path.stem}{suffix}{final_extension}")
 
 
 def build_ffmpeg_command(
@@ -177,8 +211,9 @@ def build_ffmpeg_command(
     codec: str = DEFAULT_CODEC,
     preset: str = DEFAULT_PRESET,
     cq: int = DEFAULT_CQ,
+    target_fps: int = 0,
 ) -> list[str]:
-    return [
+    command = [
         "ffmpeg",
         "-y",
         "-hide_banner",
@@ -193,6 +228,11 @@ def build_ffmpeg_command(
         "0:v:0",
         "-map",
         "0:a?",
+    ]
+    if target_fps > 0:
+        command.extend(["-r", str(target_fps)])
+    command.extend(
+        [
         "-c:v",
         codec,
         "-preset",
@@ -208,4 +248,6 @@ def build_ffmpeg_command(
         "-c:a",
         "copy",
         str(output_path),
-    ]
+        ]
+    )
+    return command

@@ -21,6 +21,7 @@ class ConversionWorker(QThread):
         codec: str,
         preset: str,
         cq: int,
+        target_fps: int,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -28,6 +29,7 @@ class ConversionWorker(QThread):
         self._codec = codec
         self._preset = preset
         self._cq = cq
+        self._target_fps = target_fps
         self._cancel_requested = False
         self._process: subprocess.Popen[str] | None = None
 
@@ -50,6 +52,7 @@ class ConversionWorker(QThread):
                 codec=self._codec,
                 preset=self._preset,
                 cq=self._cq,
+                target_fps=self._target_fps,
             )
             self.batch_message.emit(f"변환 시작: {queue_entry.source_path.name}")
 
