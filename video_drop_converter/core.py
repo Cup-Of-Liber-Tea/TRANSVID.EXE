@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
@@ -21,7 +23,6 @@ VIDEO_EXTENSIONS = {
 }
 
 DEFAULT_CODEC = "hevc_nvenc"
-DEFAULT_PRESET = "p1"
 DEFAULT_CQ = 28
 DEFAULT_TARGET_FPS = 24
 DEFAULT_PARALLEL_JOBS = 2
@@ -29,6 +30,60 @@ DEFAULT_BASELINE_REALTIME = 29.0
 DEFAULT_SUFFIX_TEMPLATE = ".{codec}_{preset}_cq{cq}{fps_suffix}"
 FPS_OPTIONS = [0, 24, 30]
 PARALLEL_JOB_OPTIONS = [1, 2, 3]
+
+
+@dataclass(frozen=True, slots=True)
+class EncoderProfile:
+    codec: str
+    preset: str
+    display_name: str
+    quality_label: str
+    baseline_realtime: float
+    parallel_jobs: int = DEFAULT_PARALLEL_JOBS
+
+
+@dataclass(frozen=True, slots=True)
+class EncoderDetectionResult:
+    profile: EncoderProfile
+    message: str
+
+
+ENCODER_PROFILES = {
+    "hevc_nvenc": EncoderProfile(
+        codec="hevc_nvenc",
+        preset="p1",
+        display_name="NVIDIA NVENC",
+        quality_label="CQ",
+        baseline_realtime=29.0,
+        parallel_jobs=2,
+    ),
+    "hevc_qsv": EncoderProfile(
+        codec="hevc_qsv",
+        preset="veryfast",
+        display_name="Intel Quick Sync",
+        quality_label="GQ",
+        baseline_realtime=18.0,
+        parallel_jobs=2,
+    ),
+    "hevc_amf": EncoderProfile(
+        codec="hevc_amf",
+        preset="speed",
+        display_name="AMD AMF",
+        quality_label="CQ",
+        baseline_realtime=22.0,
+        parallel_jobs=2,
+    ),
+    "libx265": EncoderProfile(
+        codec="libx265",
+        preset="veryfast",
+        display_name="CPU x265",
+        quality_label="CRF",
+        baseline_realtime=4.0,
+        parallel_jobs=1,
+    ),
+}
+ENCODER_DETECTION_ORDER = ("hevc_nvenc", "hevc_qsv", "hevc_amf", "libx265")
+DEFAULT_PRESET = ENCODER_PROFILES[DEFAULT_CODEC].preset
 
 
 @dataclass(slots=True)
@@ -55,6 +110,164 @@ def ensure_ffmpeg_tools() -> list[str]:
         if shutil.which(tool_name) is None:
             missing.append(tool_name)
     return missing
+
+
+def get_encoder_profile(codec: str = DEFAULT_CODEC) -> EncoderProfile:
+    return ENCODER_PROFILES.get(codec, ENCODER_PROFILES[DEFAULT_CODEC])
+
+
+@lru_cache(maxsize=1)
+def _list_ffmpeg_encoders() -> set[str]:
+    completed = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-encoders"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if completed.returncode != 0:
+        return set()
+
+    encoders: set[str] = set()
+    for line in completed.stdout.splitlines():
+        match = re.match(r"^\s*[A-Z\.]{6}\s+([a-z0-9_]+)\s", line)
+        if match:
+            encoders.add(match.group(1))
+    return encoders
+
+
+def _build_profile_video_args(profile: EncoderProfile, quality_value: int) -> list[str]:
+    if profile.codec == "hevc_nvenc":
+        return [
+            "-c:v",
+            profile.codec,
+            "-preset",
+            profile.preset,
+            "-rc",
+            "vbr",
+            "-cq",
+            str(quality_value),
+            "-b:v",
+            "0",
+            "-tag:v",
+            "hvc1",
+        ]
+
+    if profile.codec == "hevc_qsv":
+        return [
+            "-c:v",
+            profile.codec,
+            "-preset",
+            profile.preset,
+            "-global_quality",
+            str(quality_value),
+            "-b:v",
+            "0",
+            "-tag:v",
+            "hvc1",
+        ]
+
+    if profile.codec == "hevc_amf":
+        return [
+            "-c:v",
+            profile.codec,
+            "-quality",
+            profile.preset,
+            "-rc",
+            "qvbr",
+            "-qvbr_quality_level",
+            str(quality_value),
+            "-tag:v",
+            "hvc1",
+        ]
+
+    if profile.codec == "libx265":
+        return [
+            "-c:v",
+            profile.codec,
+            "-preset",
+            profile.preset,
+            "-crf",
+            str(quality_value),
+            "-tag:v",
+            "hvc1",
+        ]
+
+    raise ValueError(f"지원하지 않는 인코더입니다: {profile.codec}")
+
+
+def _probe_encoder_profile(profile: EncoderProfile, quality_value: int = DEFAULT_CQ) -> tuple[bool, str]:
+    command = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=1280x720:r=24:d=0.2",
+        "-frames:v",
+        "3",
+        "-an",
+        *_build_profile_video_args(profile, quality_value),
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "encoder probe timed out"
+    stderr_text = (completed.stderr or "").strip()
+    return completed.returncode == 0, stderr_text
+
+
+@lru_cache(maxsize=1)
+def detect_encoder() -> EncoderDetectionResult:
+    available_encoders = _list_ffmpeg_encoders()
+    failed_hardware_profiles: list[str] = []
+
+    for codec in ENCODER_DETECTION_ORDER:
+        profile = get_encoder_profile(codec)
+        if codec not in available_encoders:
+            continue
+        if codec == "libx265":
+            if failed_hardware_profiles:
+                message = (
+                    "하드웨어 HEVC 인코더를 초기화하지 못해 CPU x265로 전환합니다. "
+                    f"({', '.join(failed_hardware_profiles)} 실패)"
+                )
+            else:
+                message = "하드웨어 HEVC 인코더를 찾지 못해 CPU x265로 전환합니다."
+            return EncoderDetectionResult(profile=profile, message=message)
+
+        is_ready, error_message = _probe_encoder_profile(profile)
+        if is_ready:
+            message = f"하드웨어 감지 완료: {profile.display_name} ({profile.codec} / {profile.preset})"
+            return EncoderDetectionResult(profile=profile, message=message)
+
+        if error_message:
+            failed_hardware_profiles.append(profile.display_name)
+
+    fallback_codec = "libx265" if "libx265" in available_encoders else DEFAULT_CODEC
+    fallback_profile = get_encoder_profile(fallback_codec)
+    return EncoderDetectionResult(
+        profile=fallback_profile,
+        message=(
+            "사용 가능한 HEVC 인코더를 찾지 못했습니다. "
+            f"{fallback_profile.display_name} 설정으로 동작합니다."
+        ),
+    )
 
 
 def make_suffix(
@@ -208,11 +421,11 @@ def build_output_path(
 def build_ffmpeg_command(
     source_path: Path,
     output_path: Path,
-    codec: str = DEFAULT_CODEC,
-    preset: str = DEFAULT_PRESET,
+    encoder_profile: EncoderProfile | None = None,
     cq: int = DEFAULT_CQ,
     target_fps: int = 0,
 ) -> list[str]:
+    profile = encoder_profile or get_encoder_profile()
     command = [
         "ffmpeg",
         "-y",
@@ -231,23 +444,6 @@ def build_ffmpeg_command(
     ]
     if target_fps > 0:
         command.extend(["-r", str(target_fps)])
-    command.extend(
-        [
-        "-c:v",
-        codec,
-        "-preset",
-        preset,
-        "-rc",
-        "vbr",
-        "-cq",
-        str(cq),
-        "-b:v",
-        "0",
-        "-tag:v",
-        "hvc1",
-        "-c:a",
-        "copy",
-        str(output_path),
-        ]
-    )
+    command.extend(_build_profile_video_args(profile, cq))
+    command.extend(["-c:a", "copy", str(output_path)])
     return command

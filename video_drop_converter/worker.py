@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from .core import QueueEntry, build_ffmpeg_command, format_file_size
+from .core import EncoderProfile, QueueEntry, build_ffmpeg_command, format_file_size
 
 
 class ConversionWorker(QThread):
@@ -18,16 +18,14 @@ class ConversionWorker(QThread):
     def __init__(
         self,
         queued_rows: list[tuple[int, QueueEntry]],
-        codec: str,
-        preset: str,
+        encoder_profile: EncoderProfile,
         cq: int,
         target_fps: int,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._queued_rows = queued_rows
-        self._codec = codec
-        self._preset = preset
+        self._encoder_profile = encoder_profile
         self._cq = cq
         self._target_fps = target_fps
         self._cancel_requested = False
@@ -49,8 +47,7 @@ class ConversionWorker(QThread):
             command = build_ffmpeg_command(
                 queue_entry.source_path,
                 queue_entry.output_path,
-                codec=self._codec,
-                preset=self._preset,
+                encoder_profile=self._encoder_profile,
                 cq=self._cq,
                 target_fps=self._target_fps,
             )

@@ -30,16 +30,15 @@ from PySide6.QtWidgets import (
 )
 
 from .core import (
-    DEFAULT_BASELINE_REALTIME,
     DEFAULT_CODEC,
     DEFAULT_CQ,
     DEFAULT_PARALLEL_JOBS,
-    DEFAULT_PRESET,
     DEFAULT_TARGET_FPS,
     FPS_OPTIONS,
     PARALLEL_JOB_OPTIONS,
     QueueEntry,
     build_output_path,
+    detect_encoder,
     discover_video_files,
     estimate_realtime_speed,
     estimate_speed_multiplier,
@@ -47,6 +46,7 @@ from .core import (
     format_duration,
     format_file_size,
     format_target_fps,
+    get_encoder_profile,
     make_suffix,
     probe_video,
 )
@@ -127,13 +127,15 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("영상 드래그앤드롭 변환기")
         self.resize(1320, 820)
 
+        self._encoder_profile = get_encoder_profile(DEFAULT_CODEC)
         self._jobs: list[JobRow] = []
         self._source_keys: set[str] = set()
         self._workers: list[ConversionWorker] = []
         self._stopping = False
 
         self._build_ui()
-        self._check_tools()
+        if self._check_tools():
+            self._apply_detected_encoder()
         self._append_log("프로그램을 시작했습니다.")
 
     def _build_ui(self) -> None:
@@ -418,8 +420,9 @@ class MainWindow(QMainWindow):
         layout.setHorizontalSpacing(12)
         layout.setVerticalSpacing(8)
 
-        codec_value = QLabel(DEFAULT_CODEC)
-        preset_value = QLabel(DEFAULT_PRESET)
+        self._codec_value_label = QLabel(self._encoder_profile.codec)
+        self._preset_value_label = QLabel(self._encoder_profile.preset)
+        self._quality_name_label = QLabel(self._encoder_profile.quality_label)
 
         self._cq_spin = QSpinBox()
         self._cq_spin.setRange(18, 35)
@@ -443,7 +446,7 @@ class MainWindow(QMainWindow):
         self._baseline_spin.setDecimals(1)
         self._baseline_spin.setSingleStep(1.0)
         self._baseline_spin.setSuffix(" x")
-        self._baseline_spin.setValue(DEFAULT_BASELINE_REALTIME)
+        self._baseline_spin.setValue(self._encoder_profile.baseline_realtime)
         self._baseline_spin.valueChanged.connect(self._update_setting_labels)
 
         self._suffix_label = QLabel()
@@ -456,10 +459,10 @@ class MainWindow(QMainWindow):
         self._skip_existing_checkbox.setChecked(True)
 
         layout.addWidget(QLabel("코덱"), 0, 0)
-        layout.addWidget(codec_value, 0, 1)
+        layout.addWidget(self._codec_value_label, 0, 1)
         layout.addWidget(QLabel("프리셋"), 0, 2)
-        layout.addWidget(preset_value, 0, 3)
-        layout.addWidget(QLabel("CQ"), 0, 4)
+        layout.addWidget(self._preset_value_label, 0, 3)
+        layout.addWidget(self._quality_name_label, 0, 4)
         layout.addWidget(self._cq_spin, 0, 5)
         layout.addWidget(QLabel("출력 접미사"), 0, 6)
         layout.addWidget(self._suffix_label, 0, 7)
@@ -479,14 +482,35 @@ class MainWindow(QMainWindow):
         self._update_setting_labels()
         return container
 
-    def _check_tools(self) -> None:
+    def _check_tools(self) -> bool:
         missing = ensure_ffmpeg_tools()
         if not missing:
-            return
+            return True
         message = "다음 도구를 PATH에서 찾지 못했습니다: " + ", ".join(missing)
         QMessageBox.critical(self, "도구 없음", message)
         self._append_log(message)
         self._set_controls_enabled(False)
+        return False
+
+    def _apply_detected_encoder(self) -> None:
+        detection = detect_encoder()
+        profile = detection.profile
+        self._encoder_profile = profile
+        self._codec_value_label.setText(profile.codec)
+        self._preset_value_label.setText(profile.preset)
+        self._quality_name_label.setText(profile.quality_label)
+        self._baseline_spin.blockSignals(True)
+        self._baseline_spin.setValue(profile.baseline_realtime)
+        self._baseline_spin.blockSignals(False)
+
+        default_parallel_jobs = profile.parallel_jobs if profile.parallel_jobs in PARALLEL_JOB_OPTIONS else DEFAULT_PARALLEL_JOBS
+        default_parallel_index = max(0, PARALLEL_JOB_OPTIONS.index(default_parallel_jobs))
+        self._parallel_combo.blockSignals(True)
+        self._parallel_combo.setCurrentIndex(default_parallel_index)
+        self._parallel_combo.blockSignals(False)
+
+        self._update_setting_labels()
+        self._append_log(detection.message)
 
     def _pick_files(self) -> None:
         file_names, _ = QFileDialog.getOpenFileNames(
@@ -504,7 +528,12 @@ class MainWindow(QMainWindow):
             self._handle_paths_dropped([directory])
 
     def _handle_paths_dropped(self, raw_paths: list[str]) -> None:
-        suffix = make_suffix(cq=self._cq_spin.value(), target_fps=self._selected_target_fps())
+        suffix = make_suffix(
+            codec=self._encoder_profile.codec,
+            preset=self._encoder_profile.preset,
+            cq=self._cq_spin.value(),
+            target_fps=self._selected_target_fps(),
+        )
         discovered = discover_video_files((Path(path) for path in raw_paths), suffix=suffix)
         if not discovered:
             self._append_log("추가할 영상 파일을 찾지 못했습니다.")
@@ -590,8 +619,7 @@ class MainWindow(QMainWindow):
         for queued_rows in job_buckets:
             worker = ConversionWorker(
                 queued_rows=queued_rows,
-                codec=DEFAULT_CODEC,
-                preset=DEFAULT_PRESET,
+                encoder_profile=self._encoder_profile,
                 cq=self._cq_spin.value(),
                 target_fps=target_fps,
                 parent=self,
@@ -620,7 +648,8 @@ class MainWindow(QMainWindow):
         )
         self._append_log(
             "변환 배치를 시작합니다. "
-            f"설정: {DEFAULT_CODEC} / {DEFAULT_PRESET} / cq {self._cq_spin.value()} / "
+            f"설정: {self._encoder_profile.codec} / {self._encoder_profile.preset} / "
+            f"{self._encoder_profile.quality_label.lower()} {self._cq_spin.value()} / "
             f"{format_target_fps(target_fps)} / 동시 {parallel_jobs}개 / "
             f"예상 총처리 {estimate_multiplier:.2f}x / 약 {estimated_realtime:.1f}x realtime"
         )
@@ -718,7 +747,12 @@ class MainWindow(QMainWindow):
 
     def _update_setting_labels(self) -> None:
         self._suffix_label.setText(
-            make_suffix(cq=self._cq_spin.value(), target_fps=self._selected_target_fps())
+            make_suffix(
+                codec=self._encoder_profile.codec,
+                preset=self._encoder_profile.preset,
+                cq=self._cq_spin.value(),
+                target_fps=self._selected_target_fps(),
+            )
         )
         multiplier = estimate_speed_multiplier(
             cq=self._cq_spin.value(),
@@ -734,7 +768,8 @@ class MainWindow(QMainWindow):
         self._estimate_label.setText(f"{multiplier:.2f}x | 약 {estimated_realtime:.1f}x realtime")
         self._drop_area.secondary_label.setText(
             "기본 설정: "
-            f"{DEFAULT_CODEC} / {DEFAULT_PRESET} / cq {self._cq_spin.value()} / "
+            f"{self._encoder_profile.codec} / {self._encoder_profile.preset} / "
+            f"{self._encoder_profile.quality_label.lower()} {self._cq_spin.value()} / "
             f"{format_target_fps(self._selected_target_fps())} / 동시 {self._selected_parallel_jobs()}개"
         )
 
