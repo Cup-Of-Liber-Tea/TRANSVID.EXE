@@ -37,7 +37,9 @@ from .core import (
     ensure_ffmpeg_tools,
     format_duration,
     format_file_size,
+    get_runtime_output_directory,
     make_suffix,
+    make_unique_output_path,
     probe_video,
 )
 from .worker import ConversionWorker
@@ -119,11 +121,13 @@ class MainWindow(QMainWindow):
 
         self._jobs: list[JobRow] = []
         self._source_keys: set[str] = set()
+        self._output_directory = get_runtime_output_directory()
         self._worker: ConversionWorker | None = None
 
         self._build_ui()
         self._check_tools()
         self._append_log("프로그램을 시작했습니다.")
+        self._append_log(f"출력 폴더: {self._output_directory}")
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -458,6 +462,7 @@ class MainWindow(QMainWindow):
             self._append_log("추가할 영상 파일을 찾지 못했습니다.")
             return
 
+        reserved_output_paths = {job.queue_entry.output_path.resolve() for job in self._jobs}
         added_count = 0
         for source_path in discovered:
             source_key = str(source_path).lower()
@@ -471,13 +476,19 @@ class MainWindow(QMainWindow):
                 self._append_log(f"분석 실패: {source_path.name} ({exc})")
                 continue
 
-            output_path = build_output_path(source_path, suffix=suffix)
+            output_path = build_output_path(
+                source_path,
+                suffix=suffix,
+                output_dir=self._output_directory,
+            )
             if self._skip_hevc_checkbox.isChecked() and info.codec_name.lower() == "hevc":
                 self._append_log(f"이미 HEVC라 건너뜀: {source_path.name}")
                 continue
             if self._skip_existing_checkbox.isChecked() and output_path.exists():
                 self._append_log(f"출력 파일이 이미 있어 건너뜀: {output_path.name}")
                 continue
+            if output_path.resolve() in reserved_output_paths or output_path.exists():
+                output_path = make_unique_output_path(output_path, reserved_output_paths)
 
             queue_entry = QueueEntry(source_path=source_path, output_path=output_path, info=info)
             row_index = self._table.rowCount()
@@ -485,6 +496,7 @@ class MainWindow(QMainWindow):
             self._populate_row(row_index, queue_entry)
             self._jobs.append(JobRow(row_index=row_index, queue_entry=queue_entry))
             self._source_keys.add(source_key)
+            reserved_output_paths.add(output_path.resolve())
             added_count += 1
 
         if added_count == 0:

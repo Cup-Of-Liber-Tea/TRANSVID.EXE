@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -54,6 +55,14 @@ def ensure_ffmpeg_tools() -> list[str]:
 
 def make_suffix(codec: str = DEFAULT_CODEC, preset: str = DEFAULT_PRESET, cq: int = DEFAULT_CQ) -> str:
     return DEFAULT_SUFFIX_TEMPLATE.format(codec=codec, preset=preset, cq=cq)
+
+
+def get_runtime_output_directory() -> Path:
+    if sys.argv and sys.argv[0] and sys.argv[0] not in {"-", "-c"}:
+        entry_path = Path(sys.argv[0]).expanduser()
+        if entry_path.exists():
+            return entry_path.resolve().parent
+    return Path.cwd().resolve()
 
 
 def format_duration(duration_seconds: float) -> str:
@@ -140,10 +149,26 @@ def probe_video(source_path: Path) -> VideoInfo:
 def build_output_path(
     source_path: Path,
     suffix: str,
+    output_dir: Path | None = None,
     extension: str | None = None,
 ) -> Path:
     final_extension = extension or source_path.suffix
-    return source_path.with_name(f"{source_path.stem}{suffix}{final_extension}")
+    target_dir = output_dir.resolve() if output_dir is not None else source_path.parent
+    return target_dir / f"{source_path.stem}{suffix}{final_extension}"
+
+
+def make_unique_output_path(output_path: Path, reserved_paths: Iterable[Path] | None = None) -> Path:
+    reserved = {path.resolve() for path in reserved_paths or []}
+    candidate = output_path.resolve()
+    if candidate not in reserved and not candidate.exists():
+        return candidate
+
+    counter = 2
+    while True:
+        candidate = output_path.with_name(f"{output_path.stem}_{counter}{output_path.suffix}").resolve()
+        if candidate not in reserved and not candidate.exists():
+            return candidate
+        counter += 1
 
 
 def build_ffmpeg_command(
