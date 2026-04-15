@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .venv/
 GUI_THEME_SPEC.md
+build/
+dist/
+artifacts/
