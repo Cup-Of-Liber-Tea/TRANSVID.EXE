@@ -9,6 +9,8 @@ from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -28,18 +30,24 @@ from PySide6.QtWidgets import (
 )
 
 from .core import (
+    DEFAULT_BASELINE_REALTIME,
     DEFAULT_CODEC,
     DEFAULT_CQ,
+    DEFAULT_PARALLEL_JOBS,
     DEFAULT_PRESET,
+    DEFAULT_TARGET_FPS,
+    FPS_OPTIONS,
+    PARALLEL_JOB_OPTIONS,
     QueueEntry,
     build_output_path,
     discover_video_files,
+    estimate_realtime_speed,
+    estimate_speed_multiplier,
     ensure_ffmpeg_tools,
     format_duration,
     format_file_size,
-    get_runtime_output_directory,
+    format_target_fps,
     make_suffix,
-    make_unique_output_path,
     probe_video,
 )
 from .worker import ConversionWorker
@@ -80,14 +88,14 @@ class DropArea(QFrame):
         label.setWordWrap(True)
         label.setAlignment(Qt.AlignCenter)
 
-        secondary = QLabel("기본 설정: hevc_nvenc / p1 / 오디오 copy")
-        secondary.setAlignment(Qt.AlignCenter)
-        secondary.setObjectName("secondaryText")
+        self.secondary_label = QLabel("기본 설정: hevc_nvenc / p1 / 오디오 copy")
+        self.secondary_label.setAlignment(Qt.AlignCenter)
+        self.secondary_label.setObjectName("secondaryText")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.addWidget(label)
-        layout.addWidget(secondary)
+        layout.addWidget(self.secondary_label)
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
         if event.mimeData().hasUrls():
@@ -121,13 +129,12 @@ class MainWindow(QMainWindow):
 
         self._jobs: list[JobRow] = []
         self._source_keys: set[str] = set()
-        self._output_directory = get_runtime_output_directory()
-        self._worker: ConversionWorker | None = None
+        self._workers: list[ConversionWorker] = []
+        self._stopping = False
 
         self._build_ui()
         self._check_tools()
         self._append_log("프로그램을 시작했습니다.")
-        self._append_log(f"출력 폴더: {self._output_directory}")
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -293,6 +300,18 @@ class MainWindow(QMainWindow):
             QSpinBox:focus {
                 border: 1px solid #0e7490;
             }
+            QComboBox, QDoubleSpinBox {
+                min-width: 104px;
+                padding: 6px 8px;
+                border-radius: 8px;
+                border: 1px solid #b8c4cf;
+                background: #ffffff;
+                color: #17212f;
+                selection-background-color: #0e7490;
+            }
+            QComboBox:focus, QDoubleSpinBox:focus {
+                border: 1px solid #0e7490;
+            }
             QHeaderView::section {
                 background: #243447;
                 color: #f3f7fb;
@@ -405,9 +424,30 @@ class MainWindow(QMainWindow):
         self._cq_spin = QSpinBox()
         self._cq_spin.setRange(18, 35)
         self._cq_spin.setValue(DEFAULT_CQ)
-        self._cq_spin.valueChanged.connect(self._update_suffix_label)
+        self._cq_spin.valueChanged.connect(self._update_setting_labels)
+
+        self._fps_combo = QComboBox()
+        for fps_value in FPS_OPTIONS:
+            self._fps_combo.addItem(format_target_fps(fps_value), fps_value)
+        self._fps_combo.setCurrentIndex(max(0, FPS_OPTIONS.index(DEFAULT_TARGET_FPS)))
+        self._fps_combo.currentIndexChanged.connect(self._update_setting_labels)
+
+        self._parallel_combo = QComboBox()
+        for parallel_jobs in PARALLEL_JOB_OPTIONS:
+            self._parallel_combo.addItem(f"{parallel_jobs}개", parallel_jobs)
+        self._parallel_combo.setCurrentIndex(max(0, PARALLEL_JOB_OPTIONS.index(DEFAULT_PARALLEL_JOBS)))
+        self._parallel_combo.currentIndexChanged.connect(self._update_setting_labels)
+
+        self._baseline_spin = QDoubleSpinBox()
+        self._baseline_spin.setRange(1.0, 200.0)
+        self._baseline_spin.setDecimals(1)
+        self._baseline_spin.setSingleStep(1.0)
+        self._baseline_spin.setSuffix(" x")
+        self._baseline_spin.setValue(DEFAULT_BASELINE_REALTIME)
+        self._baseline_spin.valueChanged.connect(self._update_setting_labels)
 
         self._suffix_label = QLabel()
+        self._estimate_label = QLabel()
         self._auto_start_checkbox = QCheckBox("드롭 시 자동 시작")
         self._auto_start_checkbox.setChecked(True)
         self._skip_hevc_checkbox = QCheckBox("이미 HEVC면 건너뛰기")
@@ -423,12 +463,20 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._cq_spin, 0, 5)
         layout.addWidget(QLabel("출력 접미사"), 0, 6)
         layout.addWidget(self._suffix_label, 0, 7)
-        layout.addWidget(self._auto_start_checkbox, 1, 0, 1, 2)
-        layout.addWidget(self._skip_hevc_checkbox, 1, 2, 1, 2)
-        layout.addWidget(self._skip_existing_checkbox, 1, 4, 1, 3)
+        layout.addWidget(QLabel("출력 FPS"), 1, 0)
+        layout.addWidget(self._fps_combo, 1, 1)
+        layout.addWidget(QLabel("동시 작업"), 1, 2)
+        layout.addWidget(self._parallel_combo, 1, 3)
+        layout.addWidget(QLabel("기준 속도"), 1, 4)
+        layout.addWidget(self._baseline_spin, 1, 5)
+        layout.addWidget(QLabel("예상 총처리"), 1, 6)
+        layout.addWidget(self._estimate_label, 1, 7)
+        layout.addWidget(self._auto_start_checkbox, 2, 0, 1, 2)
+        layout.addWidget(self._skip_hevc_checkbox, 2, 2, 1, 2)
+        layout.addWidget(self._skip_existing_checkbox, 2, 4, 1, 3)
         layout.setColumnStretch(7, 1)
 
-        self._update_suffix_label()
+        self._update_setting_labels()
         return container
 
     def _check_tools(self) -> None:
@@ -456,13 +504,12 @@ class MainWindow(QMainWindow):
             self._handle_paths_dropped([directory])
 
     def _handle_paths_dropped(self, raw_paths: list[str]) -> None:
-        suffix = make_suffix(cq=self._cq_spin.value())
+        suffix = make_suffix(cq=self._cq_spin.value(), target_fps=self._selected_target_fps())
         discovered = discover_video_files((Path(path) for path in raw_paths), suffix=suffix)
         if not discovered:
             self._append_log("추가할 영상 파일을 찾지 못했습니다.")
             return
 
-        reserved_output_paths = {job.queue_entry.output_path.resolve() for job in self._jobs}
         added_count = 0
         for source_path in discovered:
             source_key = str(source_path).lower()
@@ -476,19 +523,13 @@ class MainWindow(QMainWindow):
                 self._append_log(f"분석 실패: {source_path.name} ({exc})")
                 continue
 
-            output_path = build_output_path(
-                source_path,
-                suffix=suffix,
-                output_dir=self._output_directory,
-            )
+            output_path = build_output_path(source_path, suffix=suffix)
             if self._skip_hevc_checkbox.isChecked() and info.codec_name.lower() == "hevc":
                 self._append_log(f"이미 HEVC라 건너뜀: {source_path.name}")
                 continue
             if self._skip_existing_checkbox.isChecked() and output_path.exists():
                 self._append_log(f"출력 파일이 이미 있어 건너뜀: {output_path.name}")
                 continue
-            if output_path.resolve() in reserved_output_paths or output_path.exists():
-                output_path = make_unique_output_path(output_path, reserved_output_paths)
 
             queue_entry = QueueEntry(source_path=source_path, output_path=output_path, info=info)
             row_index = self._table.rowCount()
@@ -496,7 +537,6 @@ class MainWindow(QMainWindow):
             self._populate_row(row_index, queue_entry)
             self._jobs.append(JobRow(row_index=row_index, queue_entry=queue_entry))
             self._source_keys.add(source_key)
-            reserved_output_paths.add(output_path.resolve())
             added_count += 1
 
         if added_count == 0:
@@ -529,7 +569,7 @@ class MainWindow(QMainWindow):
             self._table.setItem(row_index, column, item)
 
     def _start_processing(self) -> None:
-        if self._worker is not None:
+        if self._workers:
             return
 
         pending_rows = [
@@ -541,32 +581,57 @@ class MainWindow(QMainWindow):
             self._append_log("대기 중인 작업이 없습니다.")
             return
 
-        self._worker = ConversionWorker(
-            queued_rows=pending_rows,
-            codec=DEFAULT_CODEC,
-            preset=DEFAULT_PRESET,
-            cq=self._cq_spin.value(),
-            parent=self,
-        )
-        self._worker.job_started.connect(self._on_job_started)
-        self._worker.job_progress.connect(self._on_job_progress)
-        self._worker.job_finished.connect(self._on_job_finished)
-        self._worker.batch_message.connect(self._append_log)
-        self._worker.batch_finished.connect(self._on_batch_finished)
-        self._worker.start()
+        parallel_jobs = self._selected_parallel_jobs()
+        target_fps = self._selected_target_fps()
+        job_buckets = self._split_pending_rows(pending_rows, parallel_jobs)
 
+        self._workers = []
+        self._stopping = False
+        for queued_rows in job_buckets:
+            worker = ConversionWorker(
+                queued_rows=queued_rows,
+                codec=DEFAULT_CODEC,
+                preset=DEFAULT_PRESET,
+                cq=self._cq_spin.value(),
+                target_fps=target_fps,
+                parent=self,
+            )
+            worker.job_started.connect(self._on_job_started)
+            worker.job_progress.connect(self._on_job_progress)
+            worker.job_finished.connect(self._on_job_finished)
+            worker.batch_message.connect(self._append_log)
+            worker.batch_finished.connect(self._on_worker_batch_finished)
+            self._workers.append(worker)
+            worker.start()
+
+        self._set_runtime_settings_enabled(False)
         self._start_button.setEnabled(False)
         self._stop_button.setEnabled(True)
-        self._cq_spin.setEnabled(False)
+        estimate_multiplier = estimate_speed_multiplier(
+            cq=self._cq_spin.value(),
+            target_fps=target_fps,
+            parallel_jobs=parallel_jobs,
+        )
+        estimated_realtime = estimate_realtime_speed(
+            baseline_realtime=self._baseline_spin.value(),
+            cq=self._cq_spin.value(),
+            target_fps=target_fps,
+            parallel_jobs=parallel_jobs,
+        )
         self._append_log(
-            f"변환 배치를 시작합니다. 설정: {DEFAULT_CODEC} / {DEFAULT_PRESET} / cq {self._cq_spin.value()}"
+            "변환 배치를 시작합니다. "
+            f"설정: {DEFAULT_CODEC} / {DEFAULT_PRESET} / cq {self._cq_spin.value()} / "
+            f"{format_target_fps(target_fps)} / 동시 {parallel_jobs}개 / "
+            f"예상 총처리 {estimate_multiplier:.2f}x / 약 {estimated_realtime:.1f}x realtime"
         )
 
     def _stop_processing(self) -> None:
-        if self._worker is None:
+        if not self._workers:
             return
+        self._stopping = True
         self._append_log("중지 요청을 보냈습니다.")
-        self._worker.request_cancel()
+        for worker in list(self._workers):
+            worker.request_cancel()
         self._stop_button.setEnabled(False)
 
     def _on_job_started(self, row_index: int) -> None:
@@ -602,21 +667,29 @@ class MainWindow(QMainWindow):
             self._append_log(f"실패: {job.queue_entry.source_path.name} ({detail})")
         self._update_summary()
 
-    def _on_batch_finished(self, cancelled: bool) -> None:
-        self._worker = None
+    def _on_worker_batch_finished(self, cancelled: bool) -> None:
+        worker = self.sender()
+        if isinstance(worker, ConversionWorker) and worker in self._workers:
+            self._workers.remove(worker)
+            worker.deleteLater()
+
+        if self._workers:
+            return
+
         self._start_button.setEnabled(True)
         self._stop_button.setEnabled(False)
-        self._cq_spin.setEnabled(True)
-        if cancelled:
+        self._set_runtime_settings_enabled(True)
+        if cancelled or self._stopping:
             self._append_log("배치 작업이 중지되었습니다.")
         else:
             self._append_log("배치 작업이 끝났습니다.")
         self._update_summary()
+        self._stopping = False
         if self._auto_start_checkbox.isChecked() and any(job.status == "대기" for job in self._jobs):
             self._start_processing()
 
     def _clear_jobs(self) -> None:
-        if self._worker is not None:
+        if self._workers:
             QMessageBox.information(self, "진행 중", "변환 중에는 목록을 비울 수 없습니다.")
             return
         self._jobs.clear()
@@ -643,14 +716,56 @@ class MainWindow(QMainWindow):
         )
         self._overall_progress.setValue(int(total_progress))
 
-    def _update_suffix_label(self) -> None:
-        self._suffix_label.setText(make_suffix(cq=self._cq_spin.value()))
+    def _update_setting_labels(self) -> None:
+        self._suffix_label.setText(
+            make_suffix(cq=self._cq_spin.value(), target_fps=self._selected_target_fps())
+        )
+        multiplier = estimate_speed_multiplier(
+            cq=self._cq_spin.value(),
+            target_fps=self._selected_target_fps(),
+            parallel_jobs=self._selected_parallel_jobs(),
+        )
+        estimated_realtime = estimate_realtime_speed(
+            baseline_realtime=self._baseline_spin.value(),
+            cq=self._cq_spin.value(),
+            target_fps=self._selected_target_fps(),
+            parallel_jobs=self._selected_parallel_jobs(),
+        )
+        self._estimate_label.setText(f"{multiplier:.2f}x | 약 {estimated_realtime:.1f}x realtime")
+        self._drop_area.secondary_label.setText(
+            "기본 설정: "
+            f"{DEFAULT_CODEC} / {DEFAULT_PRESET} / cq {self._cq_spin.value()} / "
+            f"{format_target_fps(self._selected_target_fps())} / 동시 {self._selected_parallel_jobs()}개"
+        )
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         self._drop_area.setEnabled(enabled)
         self._start_button.setEnabled(enabled)
         self._stop_button.setEnabled(False)
+        self._set_runtime_settings_enabled(enabled)
+
+    def _set_runtime_settings_enabled(self, enabled: bool) -> None:
         self._cq_spin.setEnabled(enabled)
+        self._fps_combo.setEnabled(enabled)
+        self._parallel_combo.setEnabled(enabled)
+        self._baseline_spin.setEnabled(enabled)
+
+    def _selected_target_fps(self) -> int:
+        return int(self._fps_combo.currentData())
+
+    def _selected_parallel_jobs(self) -> int:
+        return int(self._parallel_combo.currentData())
+
+    @staticmethod
+    def _split_pending_rows(
+        pending_rows: list[tuple[int, QueueEntry]],
+        parallel_jobs: int,
+    ) -> list[list[tuple[int, QueueEntry]]]:
+        bucket_count = max(1, min(parallel_jobs, len(pending_rows)))
+        buckets: list[list[tuple[int, QueueEntry]]] = [[] for _ in range(bucket_count)]
+        for index, pending_row in enumerate(pending_rows):
+            buckets[index % bucket_count].append(pending_row)
+        return [bucket for bucket in buckets if bucket]
 
     def _set_cell_text(self, row_index: int, column: int, text: str) -> None:
         item = self._table.item(row_index, column)
@@ -664,7 +779,7 @@ class MainWindow(QMainWindow):
         self._log_output.appendPlainText(f"[{timestamp}] {message}")
 
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
-        if self._worker is None:
+        if not self._workers:
             event.accept()
             return
 
@@ -679,8 +794,10 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
 
-        self._worker.request_cancel()
-        self._worker.wait(3000)
+        for worker in list(self._workers):
+            worker.request_cancel()
+        for worker in list(self._workers):
+            worker.wait(3000)
         event.accept()
 
 
