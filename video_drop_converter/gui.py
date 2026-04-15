@@ -127,6 +127,7 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         root = QWidget()
+        root.setObjectName("rootPanel")
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(16, 16, 16, 16)
         root_layout.setSpacing(12)
@@ -139,11 +140,14 @@ class MainWindow(QMainWindow):
         settings_group = self._build_settings_panel()
 
         self._summary_label = QLabel("대기 중인 작업이 없습니다.")
+        self._summary_label.setObjectName("summaryLabel")
         self._overall_progress = QProgressBar()
         self._overall_progress.setRange(0, 100)
         self._overall_progress.setValue(0)
+        self._overall_progress.setObjectName("overallProgress")
 
         self._table = QTableWidget(0, 10)
+        self._table.setObjectName("jobTable")
         self._table.setHorizontalHeaderLabels(
             [
                 "입력 파일",
@@ -170,9 +174,13 @@ class MainWindow(QMainWindow):
         self._table.setAlternatingRowColors(True)
 
         self._log_output = QPlainTextEdit()
+        self._log_output.setObjectName("logPanel")
         self._log_output.setReadOnly(True)
         self._log_output.setMaximumBlockCount(1000)
         self._log_output.setPlaceholderText("로그가 여기 표시됩니다.")
+
+        log_label = QLabel("로그")
+        log_label.setObjectName("sectionLabel")
 
         root_layout.addWidget(toolbar)
         root_layout.addWidget(settings_group)
@@ -180,7 +188,7 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._summary_label)
         root_layout.addWidget(self._overall_progress)
         root_layout.addWidget(self._table, stretch=1)
-        root_layout.addWidget(QLabel("로그"))
+        root_layout.addWidget(log_label)
         root_layout.addWidget(self._log_output, stretch=1)
 
         self.setCentralWidget(root)
@@ -188,25 +196,170 @@ class MainWindow(QMainWindow):
             """
             QWidget {
                 font-size: 13px;
+                color: #17212f;
             }
-            QMainWindow {
-                background: #f4f6f8;
+            #rootPanel {
+                background: #eff3f7;
+            }
+            #toolbarPanel, #settingsPanel {
+                background: #f8fbfd;
+                border: 1px solid #d9e3ea;
+                border-radius: 12px;
+            }
+            QLabel {
+                color: #324152;
+            }
+            #summaryLabel {
+                color: #304255;
+                font-size: 14px;
+                font-weight: 600;
+                padding: 4px 2px;
+            }
+            #sectionLabel {
+                color: #3f5368;
+                font-size: 12px;
+                font-weight: 700;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+            }
+            QPushButton {
+                background: #2f455c;
+                color: #f8fbff;
+                border: 1px solid #25384c;
+                border-radius: 8px;
+                padding: 9px 14px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #38536e;
+            }
+            QPushButton:pressed {
+                background: #24384b;
+            }
+            QPushButton:disabled {
+                background: #a7b2bd;
+                color: #eef2f5;
+                border-color: #a7b2bd;
+            }
+            QPushButton[kind="primary"] {
+                background: #0e7490;
+                border-color: #0b5b71;
+            }
+            QPushButton[kind="primary"]:hover {
+                background: #1188aa;
+            }
+            QPushButton[kind="stop"] {
+                background: #9a3412;
+                border-color: #7c2d12;
+            }
+            QPushButton[kind="stop"]:hover {
+                background: #b45309;
+            }
+            QPushButton[kind="clear"] {
+                background: #5b6570;
+                border-color: #49535d;
+            }
+            QPushButton[kind="clear"]:hover {
+                background: #6b7682;
+            }
+            QCheckBox {
+                color: #425466;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid #8ea1b2;
+                background: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background: #0e7490;
+                border-color: #0e7490;
+            }
+            QSpinBox {
+                min-width: 72px;
+                padding: 6px 8px;
+                border-radius: 8px;
+                border: 1px solid #b8c4cf;
+                background: #ffffff;
+                color: #17212f;
+                selection-background-color: #0e7490;
+            }
+            QSpinBox:focus {
+                border: 1px solid #0e7490;
+            }
+            QHeaderView::section {
+                background: #243447;
+                color: #f3f7fb;
+                border: none;
+                padding: 8px 10px;
+                font-weight: 700;
+            }
+            #jobTable {
+                background: #ffffff;
+                alternate-background-color: #f4f8fb;
+                gridline-color: #d7e0e8;
+                border: 1px solid #cfd8df;
+                border-radius: 10px;
+                color: #1c2734;
+                selection-background-color: #d4ebf2;
+                selection-color: #10212f;
+            }
+            #jobTable::item {
+                padding: 6px;
+            }
+            #jobTable::item:selected {
+                background: #d4ebf2;
+                color: #10212f;
+            }
+            #logPanel {
+                background: #15202b;
+                color: #dce8f2;
+                border: 1px solid #243447;
+                border-radius: 10px;
+                padding: 10px;
+                selection-background-color: #0e7490;
+            }
+            #overallProgress {
+                min-height: 16px;
+                border-radius: 8px;
+                border: 1px solid #c8d3db;
+                background: #dfe7ed;
+                text-align: center;
+                color: #213547;
+                font-weight: 600;
+            }
+            #overallProgress::chunk {
+                border-radius: 7px;
+                background: qlineargradient(
+                    x1: 0, y1: 0, x2: 1, y2: 0,
+                    stop: 0 #0e7490,
+                    stop: 1 #14b8a6
+                );
             }
             #dropArea {
-                border: 2px dashed #365486;
-                border-radius: 12px;
-                background: #eaf2ff;
+                border: 2px dashed #0e7490;
+                border-radius: 16px;
+                background: #f3fbfc;
+                color: #123044;
+            }
+            #dropArea QLabel {
+                color: #274257;
+                font-size: 14px;
             }
             #secondaryText {
-                color: #516579;
+                color: #53718c;
+                font-weight: 600;
             }
             """
         )
 
     def _build_toolbar(self) -> QWidget:
         container = QWidget()
+        container.setObjectName("toolbarPanel")
         layout = QHBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
         add_files_button = QPushButton("파일 추가")
@@ -214,11 +367,14 @@ class MainWindow(QMainWindow):
         add_folder_button = QPushButton("폴더 추가")
         add_folder_button.clicked.connect(self._pick_folder)
         self._start_button = QPushButton("대기열 시작")
+        self._start_button.setProperty("kind", "primary")
         self._start_button.clicked.connect(self._start_processing)
         self._stop_button = QPushButton("중지")
+        self._stop_button.setProperty("kind", "stop")
         self._stop_button.clicked.connect(self._stop_processing)
         self._stop_button.setEnabled(False)
         clear_button = QPushButton("목록 비우기")
+        clear_button.setProperty("kind", "clear")
         clear_button.clicked.connect(self._clear_jobs)
 
         layout.addWidget(add_files_button)
@@ -233,8 +389,9 @@ class MainWindow(QMainWindow):
 
     def _build_settings_panel(self) -> QWidget:
         container = QWidget()
+        container.setObjectName("settingsPanel")
         layout = QGridLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(12, 12, 12, 12)
         layout.setHorizontalSpacing(12)
         layout.setVerticalSpacing(8)
 
