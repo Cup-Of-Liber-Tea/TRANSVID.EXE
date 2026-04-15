@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +10,7 @@ from PySide6.QtCore import QTime, Qt, Signal
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractSpinBox,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -34,6 +37,7 @@ from .core import (
     DEFAULT_CQ,
     DEFAULT_PARALLEL_JOBS,
     DEFAULT_TARGET_FPS,
+    EncoderProfile,
     FPS_OPTIONS,
     PARALLEL_JOB_OPTIONS,
     QueueEntry,
@@ -128,6 +132,8 @@ class MainWindow(QMainWindow):
         self.resize(1320, 820)
 
         self._encoder_profile = get_encoder_profile(DEFAULT_CODEC)
+        self._settings_path = self._build_settings_path()
+        self._baseline_profiles = self._load_baseline_profiles()
         self._jobs: list[JobRow] = []
         self._source_keys: set[str] = set()
         self._workers: list[ConversionWorker] = []
@@ -447,7 +453,9 @@ class MainWindow(QMainWindow):
         self._baseline_spin.setSingleStep(1.0)
         self._baseline_spin.setSuffix(" x")
         self._baseline_spin.setValue(self._encoder_profile.baseline_realtime)
-        self._baseline_spin.valueChanged.connect(self._update_setting_labels)
+        self._baseline_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self._baseline_spin.setReadOnly(True)
+        self._baseline_spin.setToolTip("실제 완료 속도로 자동 보정됩니다.")
 
         self._suffix_label = QLabel()
         self._estimate_label = QLabel()
@@ -470,7 +478,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._fps_combo, 1, 1)
         layout.addWidget(QLabel("동시 작업"), 1, 2)
         layout.addWidget(self._parallel_combo, 1, 3)
-        layout.addWidget(QLabel("기준 속도"), 1, 4)
+        layout.addWidget(QLabel("예상 기준 속도"), 1, 4)
         layout.addWidget(self._baseline_spin, 1, 5)
         layout.addWidget(QLabel("예상 총처리"), 1, 6)
         layout.addWidget(self._estimate_label, 1, 7)
@@ -481,6 +489,106 @@ class MainWindow(QMainWindow):
 
         self._update_setting_labels()
         return container
+
+    @staticmethod
+    def _build_settings_path() -> Path:
+        local_appdata = os.getenv("LOCALAPPDATA")
+        if local_appdata:
+            return Path(local_appdata) / "VideoDropConverter" / "settings.json"
+        return Path.home() / ".video_drop_converter" / "settings.json"
+
+    def _load_baseline_profiles(self) -> dict[str, dict[str, float | int]]:
+        if not self._settings_path.exists():
+            return {}
+
+        try:
+            payload = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+        baseline_profiles = payload.get("baseline_profiles", {})
+        if isinstance(baseline_profiles, dict):
+            return baseline_profiles
+        return {}
+
+    def _save_baseline_profiles(self) -> None:
+        payload = {"baseline_profiles": self._baseline_profiles}
+        try:
+            self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+            self._settings_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            self._append_log(f"설정 저장 실패: {exc}")
+
+    def _encoder_profile_key(self, profile: EncoderProfile | None = None) -> str:
+        current_profile = profile or self._encoder_profile
+        return f"{current_profile.codec}:{current_profile.preset}"
+
+    def _saved_baseline_realtime(self, profile: EncoderProfile) -> float | None:
+        saved_entry = self._baseline_profiles.get(self._encoder_profile_key(profile))
+        if not isinstance(saved_entry, dict):
+            return None
+
+        saved_value = saved_entry.get("value")
+        if isinstance(saved_value, (int, float)) and saved_value > 0:
+            return round(float(saved_value), 1)
+        return None
+
+    def _set_baseline_realtime(self, value: float) -> None:
+        self._baseline_spin.blockSignals(True)
+        self._baseline_spin.setValue(round(value, 1))
+        self._baseline_spin.blockSignals(False)
+        self._update_setting_labels()
+
+    @staticmethod
+    def _parse_realtime_speed(speed: str) -> float | None:
+        normalized = speed.strip().lower()
+        if not normalized.endswith("x"):
+            return None
+
+        try:
+            parsed = float(normalized[:-1])
+        except ValueError:
+            return None
+
+        if parsed <= 0:
+            return None
+        return parsed
+
+    def _record_speed_sample(self, speed: str) -> None:
+        measured_realtime = self._parse_realtime_speed(speed)
+        if measured_realtime is None:
+            return
+
+        profile_key = self._encoder_profile_key()
+        saved_entry = self._baseline_profiles.get(profile_key, {})
+        previous_count = 0
+        previous_value = float(self._baseline_spin.value())
+        if isinstance(saved_entry, dict):
+            raw_count = saved_entry.get("sample_count", 0)
+            raw_value = saved_entry.get("value", previous_value)
+            if isinstance(raw_count, int) and raw_count > 0:
+                previous_count = min(raw_count, 19)
+            if isinstance(raw_value, (int, float)) and raw_value > 0:
+                previous_value = float(raw_value)
+
+        new_count = min(previous_count + 1, 20)
+        total = (previous_value * previous_count) + measured_realtime
+        calibrated_value = round(total / new_count, 1)
+
+        self._baseline_profiles[profile_key] = {
+            "value": calibrated_value,
+            "sample_count": new_count,
+        }
+        self._save_baseline_profiles()
+
+        if abs(calibrated_value - self._baseline_spin.value()) >= 0.05:
+            self._set_baseline_realtime(calibrated_value)
+            self._append_log(
+                f"실측 속도 반영: {self._encoder_profile.codec} 기준 {previous_value:.1f}x -> {calibrated_value:.1f}x"
+            )
 
     def _check_tools(self) -> bool:
         missing = ensure_ffmpeg_tools()
@@ -499,9 +607,10 @@ class MainWindow(QMainWindow):
         self._codec_value_label.setText(profile.codec)
         self._preset_value_label.setText(profile.preset)
         self._quality_name_label.setText(profile.quality_label)
-        self._baseline_spin.blockSignals(True)
-        self._baseline_spin.setValue(profile.baseline_realtime)
-        self._baseline_spin.blockSignals(False)
+
+        saved_baseline = self._saved_baseline_realtime(profile)
+        baseline_value = saved_baseline if saved_baseline is not None else profile.baseline_realtime
+        self._set_baseline_realtime(baseline_value)
 
         default_parallel_jobs = profile.parallel_jobs if profile.parallel_jobs in PARALLEL_JOB_OPTIONS else DEFAULT_PARALLEL_JOBS
         default_parallel_index = max(0, PARALLEL_JOB_OPTIONS.index(default_parallel_jobs))
@@ -511,6 +620,8 @@ class MainWindow(QMainWindow):
 
         self._update_setting_labels()
         self._append_log(detection.message)
+        if saved_baseline is not None:
+            self._append_log(f"저장된 실측 기준 속도 적용: {saved_baseline:.1f}x")
 
     def _pick_files(self) -> None:
         file_names, _ = QFileDialog.getOpenFileNames(
@@ -685,6 +796,7 @@ class MainWindow(QMainWindow):
         job.detail = detail
         if success:
             job.progress = 100.0
+            self._record_speed_sample(speed)
 
         self._set_cell_text(row_index, STATUS_COLUMN, job.status)
         self._set_cell_text(row_index, PROGRESS_COLUMN, f"{job.progress:.1f}%")
