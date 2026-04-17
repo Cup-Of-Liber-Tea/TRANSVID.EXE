@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import subprocess
+import threading
+from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
@@ -12,6 +14,22 @@ from .core import (
     format_file_size,
     get_subprocess_windowless_kwargs,
 )
+
+
+_PROGRESS_KEYS = {
+    "bitrate",
+    "drop_frames",
+    "dup_frames",
+    "fps",
+    "frame",
+    "out_time",
+    "out_time_ms",
+    "out_time_us",
+    "progress",
+    "speed",
+    "stream_0_0_q",
+    "total_size",
+}
 
 
 class ConversionWorker(QThread):
@@ -57,11 +75,12 @@ class ConversionWorker(QThread):
                 cq=self._cq,
                 target_fps=self._target_fps,
             )
-            self.batch_message.emit(f"변환 시작: {queue_entry.source_path.name}")
+            self.batch_message.emit(f"\ubcc0\ud658 \uc2dc\uc791: {queue_entry.source_path.name}")
 
             try:
                 self._process = subprocess.Popen(
                     command,
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -76,26 +95,46 @@ class ConversionWorker(QThread):
 
             latest_speed = "-"
             last_percent = 0.0
+            finalizing_logged = False
+            progress_buffer: dict[str, str] = {}
+            stderr_lines: deque[str] = deque(maxlen=40)
 
             assert self._process.stdout is not None
-            progress_buffer: dict[str, str] = {}
+            assert self._process.stderr is not None
+
+            stderr_reader = threading.Thread(
+                target=self._drain_stream,
+                args=(self._process.stderr, stderr_lines),
+                daemon=True,
+            )
+            stderr_reader.start()
+
             for raw_line in self._process.stdout:
                 line = raw_line.strip()
                 if not line or "=" not in line:
                     continue
 
                 key, value = line.split("=", 1)
+                if key not in _PROGRESS_KEYS:
+                    continue
+
                 progress_buffer[key] = value
 
                 if key == "speed":
                     latest_speed = value
 
                 if key == "progress":
-                    out_time_us = progress_buffer.get("out_time_us")
-                    if out_time_us:
-                        processed_seconds = max(float(out_time_us) / 1_000_000.0, 0.0)
-                        if queue_entry.info.duration_seconds > 0:
-                            last_percent = min(processed_seconds / queue_entry.info.duration_seconds, 1.0) * 100.0
+                    last_percent = self._extract_percent(
+                        progress_buffer,
+                        queue_entry.info.duration_seconds,
+                        last_percent,
+                    )
+                    if value == "end":
+                        last_percent = 100.0
+                        if not finalizing_logged:
+                            self.batch_message.emit(f"\ub9c8\ubb34\ub9ac \uc911: {queue_entry.source_path.name}")
+                            finalizing_logged = True
+
                     self.job_progress.emit(row_index, last_percent, latest_speed)
                     progress_buffer.clear()
 
@@ -103,17 +142,15 @@ class ConversionWorker(QThread):
                         self.request_cancel()
                         break
 
-            stderr_output = ""
-            if self._process.stderr is not None:
-                stderr_output = self._process.stderr.read().strip()
-
             return_code = self._process.wait()
+            stderr_reader.join()
+            stderr_output = "\n".join(stderr_lines).strip()
             self._process = None
 
             if self._cancel_requested:
                 cancelled = True
                 self._cleanup_partial_output(queue_entry.output_path)
-                self.job_finished.emit(row_index, False, latest_speed, "사용자가 중지했습니다.")
+                self.job_finished.emit(row_index, False, latest_speed, "\uc0ac\uc6a9\uc790\uac00 \uc911\uc9c0\ud588\uc2b5\ub2c8\ub2e4.")
                 break
 
             if return_code == 0 and queue_entry.output_path.exists():
@@ -123,10 +160,34 @@ class ConversionWorker(QThread):
                 continue
 
             self._cleanup_partial_output(queue_entry.output_path)
-            error_message = stderr_output or f"ffmpeg 종료 코드: {return_code}"
+            error_message = stderr_output or f"ffmpeg \uc885\ub8cc \ucf54\ub4dc: {return_code}"
             self.job_finished.emit(row_index, False, latest_speed, error_message)
 
         self.batch_finished.emit(cancelled)
+
+    @staticmethod
+    def _drain_stream(stream, sink: deque[str]) -> None:
+        for raw_line in stream:
+            line = raw_line.strip()
+            if line:
+                sink.append(line)
+
+    @staticmethod
+    def _extract_percent(
+        progress_buffer: dict[str, str],
+        duration_seconds: float,
+        current_percent: float,
+    ) -> float:
+        out_time_us = progress_buffer.get("out_time_us")
+        if not out_time_us or duration_seconds <= 0:
+            return current_percent
+
+        try:
+            processed_seconds = max(float(out_time_us) / 1_000_000.0, 0.0)
+        except ValueError:
+            return current_percent
+
+        return min(processed_seconds / duration_seconds, 1.0) * 100.0
 
     @staticmethod
     def _cleanup_partial_output(output_path: Path) -> None:

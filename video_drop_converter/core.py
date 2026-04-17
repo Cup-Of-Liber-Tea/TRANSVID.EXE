@@ -448,6 +448,7 @@ def build_ffmpeg_command(
         "-hide_banner",
         "-loglevel",
         "error",
+        "-nostdin",
         "-nostats",
         "-progress",
         "pipe:1",
