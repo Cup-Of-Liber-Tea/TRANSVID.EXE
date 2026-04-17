@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import time
 from collections import deque
 from pathlib import Path
 
@@ -31,10 +32,14 @@ _PROGRESS_KEYS = {
     "total_size",
 }
 
+_STALL_LOG_INTERVAL_SECONDS = 15.0
+_TIME_EPSILON_SECONDS = 0.25
+
 
 class ConversionWorker(QThread):
     job_started = Signal(int)
     job_progress = Signal(int, float, str)
+    job_detail = Signal(int, str)
     job_finished = Signal(int, bool, str, str)
     batch_finished = Signal(bool)
     batch_message = Signal(str)
@@ -96,6 +101,9 @@ class ConversionWorker(QThread):
             latest_speed = "-"
             last_percent = 0.0
             finalizing_logged = False
+            last_processed_seconds = 0.0
+            last_progress_change_at = time.monotonic()
+            stalled_logged = False
             progress_buffer: dict[str, str] = {}
             stderr_lines: deque[str] = deque(maxlen=40)
 
@@ -124,6 +132,22 @@ class ConversionWorker(QThread):
                     latest_speed = value
 
                 if key == "progress":
+                    processed_seconds = self._extract_processed_seconds(progress_buffer)
+                    if processed_seconds > last_processed_seconds + _TIME_EPSILON_SECONDS:
+                        if stalled_logged:
+                            self.job_detail.emit(row_index, "\uc9c4\ud589 \uc7ac\uac1c")
+                            self.batch_message.emit(f"\uc9c4\ud589 \uc7ac\uac1c: {queue_entry.source_path.name}")
+                            stalled_logged = False
+                        last_processed_seconds = processed_seconds
+                        last_progress_change_at = time.monotonic()
+                    elif time.monotonic() - last_progress_change_at >= _STALL_LOG_INTERVAL_SECONDS and not stalled_logged:
+                        self.job_detail.emit(row_index, "\uc9c4\ud589 \uc815\uccb4 \uac10\uc9c0")
+                        self.batch_message.emit(
+                            f"\uc9c4\ud589 \uc815\uccb4 \uac10\uc9c0: {queue_entry.source_path.name} "
+                            f"({last_percent:.1f}% / {latest_speed})"
+                        )
+                        stalled_logged = True
+
                     last_percent = self._extract_percent(
                         progress_buffer,
                         queue_entry.info.duration_seconds,
@@ -131,6 +155,7 @@ class ConversionWorker(QThread):
                     )
                     if value == "end":
                         last_percent = 100.0
+                        self.job_detail.emit(row_index, "\ub9c8\ubb34\ub9ac \uc911")
                         if not finalizing_logged:
                             self.batch_message.emit(f"\ub9c8\ubb34\ub9ac \uc911: {queue_entry.source_path.name}")
                             finalizing_logged = True
@@ -178,16 +203,21 @@ class ConversionWorker(QThread):
         duration_seconds: float,
         current_percent: float,
     ) -> float:
-        out_time_us = progress_buffer.get("out_time_us")
-        if not out_time_us or duration_seconds <= 0:
-            return current_percent
-
-        try:
-            processed_seconds = max(float(out_time_us) / 1_000_000.0, 0.0)
-        except ValueError:
+        processed_seconds = ConversionWorker._extract_processed_seconds(progress_buffer)
+        if processed_seconds <= 0 or duration_seconds <= 0:
             return current_percent
 
         return min(processed_seconds / duration_seconds, 1.0) * 100.0
+
+    @staticmethod
+    def _extract_processed_seconds(progress_buffer: dict[str, str]) -> float:
+        out_time_us = progress_buffer.get("out_time_us")
+        if not out_time_us:
+            return 0.0
+        try:
+            return max(float(out_time_us) / 1_000_000.0, 0.0)
+        except ValueError:
+            return 0.0
 
     @staticmethod
     def _cleanup_partial_output(output_path: Path) -> None:

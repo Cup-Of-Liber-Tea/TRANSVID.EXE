@@ -95,6 +95,9 @@ class VideoInfo:
     width: int
     height: int
     duration_seconds: float
+    container_duration_seconds: float
+    video_duration_seconds: float
+    audio_duration_seconds: float
     file_size_bytes: int
 
 
@@ -355,6 +358,33 @@ def is_video_file(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
 
 
+def _parse_duration_value(value: object) -> float:
+    if value in (None, "", "N/A"):
+        return 0.0
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if parsed <= 0:
+        return 0.0
+    return parsed
+
+
+def _select_duration_seconds(
+    video_duration_seconds: float,
+    audio_duration_seconds: float,
+    container_duration_seconds: float,
+) -> float:
+    stream_durations = [value for value in (video_duration_seconds, audio_duration_seconds) if value > 0]
+    if stream_durations:
+        stream_duration = max(stream_durations)
+        if container_duration_seconds <= 0:
+            return stream_duration
+        if container_duration_seconds > stream_duration * 1.02:
+            return stream_duration
+    return container_duration_seconds if container_duration_seconds > 0 else max(stream_durations, default=0.0)
+
+
 def discover_video_files(paths: Iterable[Path], suffix: str, recursive: bool = True) -> list[Path]:
     discovered: dict[str, Path] = {}
     for raw_path in paths:
@@ -381,7 +411,7 @@ def probe_video(source_path: Path) -> VideoInfo:
         "-show_entries",
         (
             "format=duration,size:"
-            "stream=index,codec_type,codec_name,width,height"
+            "stream=index,codec_type,codec_name,width,height,duration"
         ),
         "-of",
         "json",
@@ -413,14 +443,25 @@ def probe_video(source_path: Path) -> VideoInfo:
         raise ValueError(f"비디오 스트림이 없습니다: {source_path}")
 
     audio_stream = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
+    container_duration_seconds = _parse_duration_value(format_info.get("duration"))
+    video_duration_seconds = _parse_duration_value(video_stream.get("duration"))
+    audio_duration_seconds = _parse_duration_value(audio_stream.get("duration")) if audio_stream else 0.0
+    duration_seconds = _select_duration_seconds(
+        video_duration_seconds=video_duration_seconds,
+        audio_duration_seconds=audio_duration_seconds,
+        container_duration_seconds=container_duration_seconds,
+    )
 
     return VideoInfo(
         source_path=source_path,
         codec_name=video_stream.get("codec_name", "unknown"),
-        audio_codec_name=audio_stream.get("codec_name"),
+        audio_codec_name=audio_stream.get("codec_name") if audio_stream else None,
         width=int(video_stream.get("width") or 0),
         height=int(video_stream.get("height") or 0),
-        duration_seconds=float(format_info.get("duration") or 0.0),
+        duration_seconds=duration_seconds,
+        container_duration_seconds=container_duration_seconds,
+        video_duration_seconds=video_duration_seconds,
+        audio_duration_seconds=audio_duration_seconds,
         file_size_bytes=int(format_info.get("size") or 0),
     )
 

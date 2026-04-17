@@ -748,6 +748,7 @@ class MainWindow(QMainWindow):
             )
             worker.job_started.connect(self._on_job_started)
             worker.job_progress.connect(self._on_job_progress)
+            worker.job_detail.connect(self._on_job_detail)
             worker.job_finished.connect(self._on_job_finished)
             worker.batch_message.connect(self._append_log)
             worker.batch_finished.connect(self._on_worker_batch_finished)
@@ -799,6 +800,11 @@ class MainWindow(QMainWindow):
         self._set_cell_text(row_index, PROGRESS_COLUMN, f"{percent:.1f}%")
         self._set_cell_text(row_index, SPEED_COLUMN, speed)
         self._update_summary()
+
+    def _on_job_detail(self, row_index: int, detail: str) -> None:
+        job = self._jobs[row_index]
+        job.detail = detail
+        self._set_cell_text(row_index, DETAIL_COLUMN, detail)
 
     def _on_job_finished(self, row_index: int, success: bool, speed: str, detail: str) -> None:
         job = self._jobs[row_index]
